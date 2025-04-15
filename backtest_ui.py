@@ -2,8 +2,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 from io import StringIO
-import talib
-from datetime import datetime
+import pandas_ta as ta
 
 # Data loading
 def load_and_validate_data(file_content):
@@ -52,33 +51,34 @@ def to_heikin_ashi(df):
     ha_low = df[['low', 'open', 'close']].min(axis=1)
     return pd.DataFrame({'time': df['time'], 'open': ha_open, 'high': ha_high, 'low': ha_low, 'close': ha_close})
 
-# Indicator calculations
+# Custom Vortex Indicator (since pandas_ta lacks it)
+def calculate_vortex(df, period=14):
+    df['vm_plus'] = abs(df['high'] - df['low'].shift(1))
+    df['vm_minus'] = abs(df['low'] - df['high'].shift(1))
+    df['tr'] = df['high'] - df['low']
+    df['vm_plus'] = df['vm_plus'].rolling(window=period).sum()
+    df['vm_minus'] = df['vm_minus'].rolling(window=period).sum()
+    df['tr'] = df['tr'].rolling(window=period).sum()
+    df['vi_plus'] = df['vm_plus'] / df['tr']
+    df['vi_minus'] = df['vm_minus'] / df['tr']
+    return df
+
+# Indicator calculations with pandas_ta
 def calculate_indicators(df, macd_fast=12, macd_slow=26, macd_signal=9, rsi_period=14, vortex_period=14, 
                        ema_period=20, bb_period=20, bb_std=2, keltner_period=20, keltner_mult=2, 
                        stoch_k=14, stoch_d=3, stoch_smooth=3):
-    df['macd_line'], df['signal_line'], df['hist'] = talib.MACD(df['close'].values, fastperiod=macd_fast, 
-                                                               slowperiod=macd_slow, signalperiod=macd_signal)
-    df['rsi'] = talib.RSI(df['close'].values, timeperiod=rsi_period)
-    df['vi_plus'], df['vi_minus'] = talib.PLUS_DI(df['high'].values, df['low'].values, df['close'].values, 
-                                                 timeperiod=vortex_period), talib.MINUS_DI(df['high'].values, 
-                                                                                          df['low'].values, 
-                                                                                          df['close'].values, 
-                                                                                          timeperiod=vortex_period)
-    df['ema'] = talib.EMA(df['close'].values, timeperiod=ema_period)
-    df['bb_mid'] = df['close'].rolling(window=bb_period).mean()
-    df['bb_std'] = df['close'].rolling(window=bb_period).std()
-    df['bb_upper'] = df['bb_mid'] + (bb_std * df['bb_std'])
-    df['bb_lower'] = df['bb_mid'] - (bb_std * df['bb_std'])
-    df['keltner_mid'] = df['close'].rolling(window=keltner_period).mean()
-    df['keltner_atr'] = talib.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=keltner_period)
-    df['keltner_upper'] = df['keltner_mid'] + (keltner_mult * df['keltner_atr'])
-    df['keltner_lower'] = df['keltner_mid'] - (keltner_mult * df['keltner_atr'])
-    df['stoch_k'], df['stoch_d'] = talib.STOCH(df['high'].values, df['low'].values, df['close'].values, 
-                                              fastk_period=stoch_k, slowk_period=stoch_smooth, 
-                                              slowd_period=stoch_d)
+    df = df.copy()
+    df[['macd_line', 'macd', 'signal_line']] = df.ta.macd(fast=macd_fast, slow=macd_slow, signal=macd_signal)
+    df['rsi'] = df.ta.rsi(length=rsi_period)
+    df = calculate_vortex(df, vortex_period)
+    df['ema'] = df.ta.ema(length=ema_period)
+    df['bb_upper'], df['bb_mid'], df['bb_lower'] = df.ta.bbands(length=bb_period, std=bb_std)
+    df['keltner_upper'], df['keltner_mid'], df['keltner_lower'] = df.ta.kc(length=keltner_period, scalar=keltner_mult)
+    df['stoch_k'], df['stoch_d'] = df.ta.stoch(high=df['high'], low=df['low'], close=df['close'], 
+                                              k=stoch_k, d=stoch_d, smoothk=stoch_smooth)
     return df
 
-# Strategy builder (simplified Streak clone)
+# Strategy builder
 def build_strategy(df, conditions):
     signals = pd.DataFrame(index=df.index, columns=['signal'], data=0)
     for i in range(1, len(df)):
@@ -129,7 +129,7 @@ def backtest(df, signals, initial_equity=10000, risk_per_trade=0.1, sl_percent=0
     equity_series = pd.Series(equity_history, index=pd.concat([pd.Series([df['time'].iloc[0]]), df['time']]).reset_index(drop=True))
     return equity, trade_log, equity_series
 
-# Scanner (basic)
+# Scanner
 def scanner(df, condition):
     return df[eval(condition)]
 
@@ -196,7 +196,7 @@ with tabs[0]:  # Settings
     macd_fast = st.text_input("MACD Fast Length", value="12")
     try:
         macd_fast = int(macd_fast)
-    except ValueError:
+    except ValueValueError:
         st.error("Invalid MACD Fast Length. Use an integer.")
         st.stop()
     macd_slow = st.text_input("MACD Slow Length", value="26")
@@ -288,10 +288,10 @@ with tabs[0]:  # Settings
 with tabs[1]:  # Strategy Builder
     st.subheader("Build Your Strategy")
     conditions = []
-    entry_conditions = st.text_area("Entry Conditions (e.g., 'df['macd_line'] > df['signal_line']')", 
-                                   value="df['Fisher'] > df['Trigger']")
-    exit_conditions = st.text_area("Exit Conditions (e.g., 'df['rsi'] > 70')", 
-                                  value="df['Fisher'] < df['Trigger']")
+    entry_conditions = st.text_area("Entry Conditions (e.g., 'chart_df['macd_line'] > chart_df['signal_line']')", 
+                                   value="chart_df['Fisher'] > chart_df['Trigger']")
+    exit_conditions = st.text_area("Exit Conditions (e.g., 'chart_df['rsi'] > 70')", 
+                                  value="chart_df['Fisher'] < chart_df['Trigger']")
     if st.button("Add Strategy"):
         conditions.append({'type': 'entry', 'rule': entry_conditions})
         conditions.append({'type': 'exit', 'rule': exit_conditions})
@@ -311,8 +311,14 @@ with tabs[2]:  # Backtest
         equity, trade_log, equity_series = backtest(chart_df, signals, initial_equity=10000, risk_per_trade=risk, sl_percent=sl, tp_percent=tp)
         if equity is not None:
             st.write(f"Final Equity: ${equity:.2f}")
-            st.write("Max Drawdown: TBD")  # Placeholder for calc
-            st.write("Win Rate: TBD")     # Placeholder for calc
+            # Simple drawdown calc (placeholder)
+            drawdown = (equity_series.cummax() - equity_series).max()
+            st.write(f"Max Drawdown: ${drawdown:.2f}")
+            # Win rate (placeholder)
+            wins = sum(1 for t in trade_log if t['profit'] > 0)
+            total_trades = len(trade_log)
+            win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+            st.write(f"Win Rate: {win_rate:.2f}%")
             st.write("Trade Log:")
             trade_df = pd.DataFrame(trade_log)
             trade_df['time'] = pd.to_datetime(trade_df['time'])
@@ -327,7 +333,7 @@ with tabs[2]:  # Backtest
                 st.success("Strategy deployed! Check logs for alerts.")
 
 with tabs[3]:  # Scanner
-    scan_condition = st.text_input("Scan Condition (e.g., 'df['rsi'] > 70')", value="df['rsi'] > 70")
+    scan_condition = st.text_input("Scan Condition (e.g., 'chart_df['rsi'] > 70')", value="chart_df['rsi'] > 70")
     if st.button("Scan"):
         scanned_df = scanner(chart_df, scan_condition)
         st.write("Scanned Results:", scanned_df)
