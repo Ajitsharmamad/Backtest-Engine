@@ -1,15 +1,17 @@
 import pandas as pd
 import numpy as np
 import streamlit as st
+from io import StringIO  # Correct import for StringIO
 
-# Data loading
+# Data loading with better error handling
 def load_and_validate_data(file_content):
     try:
-        # Handle potential encoding issues
+        string_io = StringIO(file_content.decode('utf-8'))
         try:
-            df = pd.read_csv(pd.StringIO(file_content.decode('utf-8')))
+            df = pd.read_csv(string_io)
         except UnicodeDecodeError:
-            df = pd.read_csv(pd.StringIO(file_content.decode('latin-1')))
+            string_io = StringIO(file_content.decode('latin-1'))
+            df = pd.read_csv(string_io)
         df['time'] = pd.to_datetime(df['time'])
         required_cols = ['time', 'open', 'high', 'low', 'close', 'EMA', 'Fisher', 'Trigger']
         if not all(col in df.columns for col in required_cols):
@@ -18,17 +20,16 @@ def load_and_validate_data(file_content):
             raise ValueError("Data contains NaN values")
         return df
     except Exception as e:
-        st.error(f"Error loading data: {e}")
+        st.error(f"Data loading error: {e}")
         return None
 
-# Renko conversion (optimized with batch processing)
+# Renko conversion
 def to_renko(df, brick_size=0.5):
     try:
         df = df.sort_values('time')
         renko = []
         price = df['close'].iloc[0]
         direction = 0
-        # Process in batches to reduce memory load
         for index, row in df.iterrows():
             current_price = row['close']
             while abs(current_price - price) >= brick_size:
@@ -42,23 +43,7 @@ def to_renko(df, brick_size=0.5):
                 renko.append({'time': row['time'], 'close': price, 'Fisher': row['Fisher'], 'Trigger': row['Trigger']})
         return pd.DataFrame(renko)
     except Exception as e:
-        st.error(f"Error converting to Renko: {e}")
-        return None
-
-# Strategy
-def fisher_trigger_strategy(renko_df):
-    try:
-        signals = pd.DataFrame(index=renko_df.index, columns=['signal'], data=0)
-        for i in range(1, len(renko_df)):
-            if (renko_df['Fisher'].iloc[i] > renko_df['Trigger'].iloc[i] and 
-                renko_df['Fisher'].iloc[i-1] <= renko_df['Trigger'].iloc[i-1]):
-                signals['signal'].iloc[i] = 1
-            elif (renko_df['Fisher'].iloc[i] < renko_df['Trigger'].iloc[i] and 
-                  renko_df['Fisher'].iloc[i-1] >= renko_df['Trigger'].iloc[i-1]):
-                signals['signal'].iloc[i] = -1
-        return signals
-    except Exception as e:
-        st.error(f"Error in strategy: {e}")
+        st.error(f"Renko conversion error: {e}")
         return None
 
 # Backtest with SL/TP
@@ -68,7 +53,7 @@ def backtest(renko_df, signals, initial_equity=10000, risk_per_trade=0.1, sl_per
         position = 0
         entry_price = 0
         trade_log = []
-        equity_history = [initial_equity]  # Start with initial equity
+        equity_history = [initial_equity]
         for i in range(len(renko_df)):
             current_price = renko_df['close'].iloc[i]
             if signals['signal'].iloc[i] == 1 and position == 0:
@@ -95,23 +80,59 @@ def backtest(renko_df, signals, initial_equity=10000, risk_per_trade=0.1, sl_per
                     trade_log.append({'type': 'exit', 'price': current_price, 'profit': profit, 'time': renko_df['time'].iloc[i]})
                     position = 0
             equity_history.append(equity)
-        # Align equity history with time index, starting from first timestamp
         equity_series = pd.Series(equity_history, index=pd.concat([pd.Series([renko_df['time'].iloc[0]]), renko_df['time']]).reset_index(drop=True))
         return equity, trade_log, equity_series
     except Exception as e:
-        st.error(f"Error in backtest: {e}")
+        st.error(f"Backtest error: {e}")
         return None, None, None
+
+# Strategy (simple Fisher for now)
+def fisher_trigger_strategy(renko_df):
+    try:
+        signals = pd.DataFrame(index=renko_df.index, columns=['signal'], data=0)
+        for i in range(1, len(renko_df)):
+            if renko_df['Fisher'].iloc[i] > renko_df['Trigger'].iloc[i] and renko_df['Fisher'].iloc[i-1] <= renko_df['Trigger'].iloc[i-1]:
+                signals['signal'].iloc[i] = 1
+            elif renko_df['Fisher'].iloc[i] < renko_df['Trigger'].iloc[i] and renko_df['Fisher'].iloc[i-1] >= renko_df['Trigger'].iloc[i-1]:
+                signals['signal'].iloc[i] = -1
+        return signals
+    except Exception as e:
+        st.error(f"Strategy error: {e}")
+        return None
 
 # Streamlit UI
 st.title("Natural Gas Backtest Engine")
 st.sidebar.header("Settings")
 
-# Input fields
+# Manual input fields replacing sliders
 uploaded_file = st.sidebar.file_uploader("Upload CSV", type="csv")
-brick_size = st.sidebar.slider("Brick Size", 0.1, 1.0, 0.5, 0.1)
-risk = st.sidebar.slider("Risk per Trade (%)", 0.1, 1.0, 0.1, 0.1)
-sl = st.sidebar.slider("Stop-Loss (%)", 0.01, 0.05, 0.02, 0.01)
-tp = st.sidebar.slider("Take-Profit (%)", 0.02, 0.10, 0.04, 0.01)
+if not uploaded_file:
+    st.warning("Please upload a CSV file with 'time', 'open', 'high', 'low', 'close', 'EMA', 'Fisher', 'Trigger' columns to proceed.")
+    st.stop()
+brick_size = st.sidebar.text_input("Brick Size", value="0.5")
+try:
+    brick_size = float(brick_size)
+except ValueError:
+    st.sidebar.error("Invalid Brick Size. Use a number (e.g., 0.5)")
+    st.stop()
+risk = st.sidebar.text_input("Risk per Trade (%)", value="0.1")
+try:
+    risk = float(risk)
+except ValueError:
+    st.sidebar.error("Invalid Risk per Trade. Use a number (e.g., 0.1)")
+    st.stop()
+sl = st.sidebar.text_input("Stop-Loss (%)", value="0.02")
+try:
+    sl = float(sl)
+except ValueError:
+    st.sidebar.error("Invalid Stop-Loss. Use a number (e.g., 0.02)")
+    st.stop()
+tp = st.sidebar.text_input("Take-Profit (%)", value="0.04")
+try:
+    tp = float(tp)
+except ValueError:
+    st.sidebar.error("Invalid Take-Profit. Use a number (e.g., 0.04)")
+    st.stop()
 
 if uploaded_file is not None:
     df = load_and_validate_data(uploaded_file.getvalue())
@@ -127,7 +148,6 @@ if uploaded_file is not None:
                     trade_df = pd.DataFrame(trade_log)
                     trade_df['time'] = pd.to_datetime(trade_df['time'])
                     st.table(trade_df)
-                    # Equity curve with proper time alignment
                     st.line_chart(equity_series)
 
 if st.button("Run Backtest"):
